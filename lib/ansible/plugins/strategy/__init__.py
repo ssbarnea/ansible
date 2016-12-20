@@ -294,6 +294,11 @@ class StrategyBase:
             else:
                 return False
 
+        # a Templar class to use for templating things later, as we're using
+        # original/non-validated objects here on the manager side. We set the
+        # variables in use later inside the loop below
+        templar = Templar(loader=self._loader)
+
         cur_pass = 0
         while True:
             try:
@@ -304,10 +309,28 @@ class StrategyBase:
             finally:
                 self._results_lock.release()
 
+            # get the original host and task, but then make a copy of the task so we can
+            # modify it via post-validate later. We then assign the "originals" to the
+            # TaskResult for use in callbacks/etc.
             original_host = get_original_host(task_result._host)
             original_task = iterator.get_original_task(original_host, task_result._task)
+            task_copy = original_task.copy(exclude_parent=True, exclude_tasks=True)
+            task_copy._parent = original_task._parent
+            original_task = task_copy
+            
             task_result._host = original_host
             task_result._task = original_task
+
+            # get the vars for this task/host pair, make them the active set of vars
+            # for our templar above, and post-validate the copy of the original task
+            task_vars = self._variable_manager.get_vars(loader=self._loader, play=iterator._play, host=original_host, task=original_task)
+            templar.set_available_variables(task_vars)
+
+            try:
+                templar._fail_on_undefined_errors = False
+                original_task.post_validate(templar)
+            finally:
+                templar._fail_on_undefined_errors = True
 
             # send callbacks for 'non final' results
             if '_ansible_retry' in task_result._result:
@@ -465,11 +488,9 @@ class StrategyBase:
 
                         # if delegated fact and we are delegating facts, we need to change target host for them
                         if original_task.delegate_to is not None and original_task.delegate_facts:
-                            task_vars = self._variable_manager.get_vars(loader=self._loader, play=iterator._play, host=original_host, task=original_task)
                             self.add_tqm_variables(task_vars, play=iterator._play)
                             if item is not None:
                                 task_vars[loop_var] = item
-                            templar = Templar(loader=self._loader, variables=task_vars)
                             host_name = templar.template(original_task.delegate_to)
                             actual_host = self._inventory.get_host(host_name)
                             if actual_host is None:
