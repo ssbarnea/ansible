@@ -1,0 +1,2 @@
+bugfixes:
+- dnf module - ensure msg returned is a string and not a tuple
